@@ -1,19 +1,56 @@
-# literature-clock
-Clock using time quotes from the literature, based on work and idea by
-        [Jaap Meijers](http://www.eerlijkemedia.nl/) ([E-reader clock](https://www.instructables.com/id/Literary-Clock-Made-From-E-reader/)).
+# ESP32 E-Ink Literature Clock
 
-Force light or dark theme with the `theme` query parameter. E.g. https://literature-clock.jenevoldsen.com?theme=dark
+Firmware for a literature quote clock on:
 
-The working site is in the docs/ folder, and can be visited at http://literature-clock.jenevoldsen.com/. To run it locally you may need to serve docs/ with an HTTP server (e.g. `python3 -m http.server`) ... or just open index.html in Firefox (thanks [@gbear605](https://github.com/gbear605)).
+- SEEED XIAO ESP32-C3
+- MH-ET LIVE 2.13" 3-color e-ink (GDEW0213Z16)
+- RV3028 RTC
 
-> ℹ️ NB: Some quotes are potentially NSFW. See issue [#11](https://github.com/JohannesNE/literature-clock/issues/11).
-> To filter out (most) NSFW quotes, use the `sfw` query parameter. E.g. https://literature-clock.jenevoldsen.com?sfw=true
-> 
+This repository is intentionally ESP32-firmware-only.
 
-# Convert .csv quotes to .json quotes
+## Build
 
-Quotes are kept in `litclock_annotated.csv`. These are converted into a `.json` file for each minute with `csv_to_json.R`. To run the R script, install R and use the package manager, {packrat}, to install the correct version of the packages: `packrat::restore()`.
+1. Install PlatformIO.
+1. From repo root, build:
 
-## Other related projects
+```powershell
+platformio run --environment seeed_xiao_esp32c3
+```
 
-- **[litime](https://github.com/ikornaselur/litime)** - A command line tool that shows a timely quote when it is executed.
+1. Upload:
+
+```powershell
+platformio run --environment seeed_xiao_esp32c3 --target upload
+```
+
+## Quote Data Pipeline
+
+- Source data: `litclock_annotated.csv`
+- Generated header used by firmware: `src/litclock_data.h`
+- Generator: `generate_litclock_data.ps1`
+
+Generate quote header:
+
+```powershell
+.\generate_litclock_data.ps1
+```
+
+Notes:
+
+- Data is normalized to UTF-8 without BOM.
+- Characters outside U+00FF are compatibility-folded for font safety.
+- Overlong leading quote text is pre-trimmed (whole words only) with a small `...` marker to keep the time phrase visible.
+
+## Wi-Fi Credentials (Optional for NTP)
+
+Copy:
+
+- `src/wifi_credentials.h.template` -> `src/wifi_credentials.h`
+
+Then fill in `WIFI_SSID` and `WIFI_PASS`.
+
+`src/wifi_credentials.h` is git-ignored.
+
+## Repository Scope
+
+The project has been cleaned to one Git repository focused on ESP32 firmware and its data-generation pipeline.
