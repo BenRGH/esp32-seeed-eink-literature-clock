@@ -6,9 +6,10 @@
 #   .\generate_litclock_data.ps1
 #
 # Parameters:
-#   -maxQuoteLen N   Drop quotes longer than N characters (default 280).
-#                    The display word-wraps gracefully; longer quotes are
-#                    simply clipped.  Increase if you want more coverage.
+#   -maxQuoteLen N   Target max characters for (before+phrase+after)
+#                    per quote in generated header (default 280).
+#                    Overlength quotes are retained and truncated around
+#                    the time phrase (whole words only).
 #   -maxBodyChars N  Target max chars for (before + phrase) shown in body
 #                    text (default 185). Used to pre-trim `before` so the
 #                    time phrase stays visible more often on-device.
@@ -21,6 +22,7 @@
 #      characters like é ü ñ are kept as UTF-8 — characters above U+00FF are
 #      compatibility-normalized and folded into safe equivalents)
 #   - Splits each row into before / phrase / after for red-highlight rendering
+#   - Retains overlength rows by truncating around the phrase with markers
 #   - Pre-trims overlong `before` text with a small leading marker so runtime
 #     drawing does not need expensive visibility trimming per refresh
 #   - Sorts entries by minute-of-day (required for binary search in firmware)
@@ -89,7 +91,10 @@ function Normalize-ForFont([string]$s) {
         [void]$sb.Append('?')
     }
 
-    return $sb.ToString()
+    $out = $sb.ToString()
+    # Keep ellipsis compact per project style: no surrounding spaces.
+    $out = [regex]::Replace($out, '\s*\.\.\.\s*', '...')
+    return $out
 }
 
 function Trim-BeforeForPhraseVisibility([string]$before, [string]$phrase, [int]$maxBodyChars) {
@@ -101,7 +106,7 @@ function Trim-BeforeForPhraseVisibility([string]$before, [string]$phrase, [int]$
     $budget = [Math]::Max(0, $maxBodyChars - $phrase.Length)
     if ($before.Length -le $budget) { return $before }
 
-    $marker = "... "
+    $marker = "..."
     $keepAfterMarker = [Math]::Max(0, $budget - $marker.Length)
     if ($keepAfterMarker -le 0) { return "" }
 
@@ -121,13 +126,16 @@ function Trim-BeforeForPhraseVisibility([string]$before, [string]$phrase, [int]$
         if ($used + $add -le $keepAfterMarker) {
             $keptWords.Insert(0, $w)
             $used += $add
+        } else {
+            # Preserve a contiguous suffix from the source text.
+            break
         }
     }
 
     if ($keptWords.Count -eq 0) { return "" }
 
     # Drop leading punctuation-only tokens so we don't start with hanging
-    # punctuation after trimming (for example: "... , and then ...").
+    # punctuation after trimming (for example: "...,and then...").
     while ($keptWords.Count -gt 0 -and $keptWords[0] -match '^[^\p{L}\p{Nd}]+$') {
         $keptWords.RemoveAt(0)
     }
@@ -140,6 +148,139 @@ function Trim-BeforeForPhraseVisibility([string]$before, [string]$phrase, [int]$
     return $marker + $body
 }
 
+function Keep-RightWordsWithMarker([string]$text, [int]$maxChars, [string]$marker) {
+    if ([string]::IsNullOrEmpty($text) -or $maxChars -le 0) { return "" }
+
+    $raw = $text.Trim()
+    if ([string]::IsNullOrEmpty($raw)) { return "" }
+    if ($raw.Length -le $maxChars) { return $raw }
+
+    $keepBudget = [Math]::Max(0, $maxChars - $marker.Length)
+    if ($keepBudget -le 0) { return "" }
+
+    $matches = [regex]::Matches($raw, '\S+')
+    if ($matches.Count -eq 0) { return "" }
+
+    $kept = New-Object System.Collections.Generic.List[string]
+    $used = 0
+    for ($i = $matches.Count - 1; $i -ge 0; $i--) {
+        $w = $matches[$i].Value
+        $add = if ($kept.Count -eq 0) { $w.Length } else { 1 + $w.Length }
+        if ($used + $add -le $keepBudget) {
+            $kept.Insert(0, $w)
+            $used += $add
+        } else {
+            # Preserve a contiguous suffix from the source text.
+            break
+        }
+    }
+
+    if ($kept.Count -eq 0) { return "" }
+    while ($kept.Count -gt 0 -and $kept[0] -match '^[^\p{L}\p{Nd}]+$') {
+        $kept.RemoveAt(0)
+    }
+    if ($kept.Count -eq 0) { return "" }
+
+    $body = ($kept -join ' ').Trim()
+    $body = [regex]::Replace($body, '^[\p{P}\p{S}\s]+', '')
+    if ([string]::IsNullOrEmpty($body)) { return "" }
+    return $marker + $body
+}
+
+function Keep-LeftWordsWithMarker([string]$text, [int]$maxChars, [string]$marker) {
+    if ([string]::IsNullOrEmpty($text) -or $maxChars -le 0) { return "" }
+
+    $raw = $text.Trim()
+    if ([string]::IsNullOrEmpty($raw)) { return "" }
+    if ($raw.Length -le $maxChars) { return $raw }
+
+    $keepBudget = [Math]::Max(0, $maxChars - $marker.Length)
+    if ($keepBudget -le 0) { return "" }
+
+    $matches = [regex]::Matches($raw, '\S+')
+    if ($matches.Count -eq 0) { return "" }
+
+    $kept = New-Object System.Collections.Generic.List[string]
+    $used = 0
+    for ($i = 0; $i -lt $matches.Count; $i++) {
+        $w = $matches[$i].Value
+        $add = if ($kept.Count -eq 0) { $w.Length } else { 1 + $w.Length }
+        if ($used + $add -le $keepBudget) {
+            $kept.Add($w)
+            $used += $add
+        } else {
+            # Preserve a contiguous prefix from the source text.
+            break
+        }
+    }
+
+    if ($kept.Count -eq 0) { return "" }
+
+    $body = ($kept -join ' ').Trim()
+    $body = [regex]::Replace($body, '[\p{P}\p{S}\s]+$', '')
+    if ([string]::IsNullOrEmpty($body)) { return "" }
+    return $body + $marker
+}
+
+function Truncate-AroundPhrase([string]$before, [string]$phrase, [string]$after, [int]$maxLen) {
+    # 1) Check current length.
+    $combined = $before + $phrase + $after
+    if ($combined.Length -le $maxLen) {
+        return [PSCustomObject]@{ Before = $before; After = $after; Truncated = $false }
+    }
+
+    # 2) Truncate around phrase with whole-word helpers and ellipsis markers.
+    $spaceBudget = [Math]::Max(0, $maxLen - $phrase.Length)
+    if ($spaceBudget -le 0) {
+        return [PSCustomObject]@{ Before = ""; After = ""; Truncated = $true }
+    }
+
+    $beforeCap = [Math]::Min($before.Length, [int][Math]::Floor($spaceBudget * 0.60))
+    $afterCap  = [Math]::Max(0, $spaceBudget - $beforeCap)
+
+    $build = {
+        param([int]$bCap, [int]$aCap)
+
+        $bRaw = $before.Trim()
+        $aRaw = $after.Trim()
+
+        $b = if ($bRaw.Length -le $bCap) { $bRaw } else { Keep-RightWordsWithMarker $before $bCap "..." }
+        $a = if ($aRaw.Length -le $aCap) { $aRaw } else { Keep-LeftWordsWithMarker  $after  $aCap "..." }
+
+        if ([string]::IsNullOrEmpty($b) -and $bRaw.Length -gt 0) {
+            $a = Keep-LeftWordsWithMarker $after $spaceBudget "..."
+        } elseif ([string]::IsNullOrEmpty($a) -and $aRaw.Length -gt 0) {
+            $b = Keep-RightWordsWithMarker $before $spaceBudget "..."
+        }
+
+        [PSCustomObject]@{ Before = $b; After = $a }
+    }
+
+    # 3) Verify final length; if still too long, shrink caps and retry.
+    $maxIters = $spaceBudget + 8
+    for ($i = 0; $i -lt $maxIters; $i++) {
+        $cand = & $build $beforeCap $afterCap
+        $finalLen = ($cand.Before + $phrase + $cand.After).Length
+        if ($finalLen -le $maxLen) {
+            return [PSCustomObject]@{ Before = $cand.Before; After = $cand.After; Truncated = $true }
+        }
+
+        if ($beforeCap -le 0 -and $afterCap -le 0) { break }
+
+        # Reduce whichever side currently has more budget.
+        if ($beforeCap -ge $afterCap -and $beforeCap -gt 0) {
+            $beforeCap--
+            $afterCap = [Math]::Max(0, $spaceBudget - $beforeCap)
+        } elseif ($afterCap -gt 0) {
+            $afterCap--
+            $beforeCap = [Math]::Max(0, $spaceBudget - $afterCap)
+        }
+    }
+
+    # Fallback: keep only phrase if budget loop couldn't satisfy constraints.
+    return [PSCustomObject]@{ Before = ""; After = ""; Truncated = $true }
+}
+
 if (-not (Test-Path $csvPath)) {
     Write-Error "Cannot find $csvPath — run from the repo root."
     exit 1
@@ -149,6 +290,7 @@ Write-Host "Reading $csvPath ..."
 $csvLines = Get-Content $csvPath -Encoding UTF8
 Write-Host "$($csvLines.Count) source rows."
 $trimmedBeforeCount = 0
+$truncatedLongCount = 0
 
 $entries = foreach ($line in $csvLines) {
     $parts = $line.Split('|')
@@ -182,8 +324,8 @@ $entries = foreach ($line in $csvLines) {
         Set-Variable $var (Normalize-ForFont ((Get-Variable $var).Value))
     }
 
-    # Length guard
-    if ($full.Length -lt 10 -or $full.Length -gt $maxQuoteLen) { continue }
+    # Length guard (minimum only). Overlength rows are truncated later.
+    if ($full.Length -lt 10) { continue }
 
     # Locate the time phrase in the full quote (case-insensitive, word-boundary)
     $phraseEsc = [regex]::Escape($phrase)
@@ -193,6 +335,11 @@ $entries = foreach ($line in $csvLines) {
     $before       = $full.Substring(0, $m.Index)
     $actualPhrase = $full.Substring($m.Index, $m.Length)  # original casing
     $after        = $full.Substring($m.Index + $m.Length)
+
+    $trunc = Truncate-AroundPhrase $before $actualPhrase $after $maxQuoteLen
+    if ($trunc.Truncated) { $truncatedLongCount++ }
+    $before = $trunc.Before
+    $after  = $trunc.After
 
     $beforeTrimmed = Trim-BeforeForPhraseVisibility $before $actualPhrase $maxBodyChars
     if ($beforeTrimmed -ne $before) { $trimmedBeforeCount++ }
@@ -219,6 +366,7 @@ $entries = foreach ($line in $csvLines) {
 # Sort by minute-of-day for the firmware binary search
 $sorted = @($entries | Sort-Object Minute)
 Write-Host "$($sorted.Count) entries retained after filtering."
+Write-Host "$truncatedLongCount overlength entries were retained via truncation."
 Write-Host "$trimmedBeforeCount entries had leading text pre-trimmed for phrase visibility."
 
 # ── Build header ──────────────────────────────────────────────────────────────
