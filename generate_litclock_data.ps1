@@ -281,6 +281,38 @@ function Truncate-AroundPhrase([string]$before, [string]$phrase, [string]$after,
     return [PSCustomObject]@{ Before = ""; After = ""; Truncated = $true }
 }
 
+function Is-JoinWordChar([char]$c) {
+    return [char]::IsLetterOrDigit($c) -or $c -eq '_'
+}
+
+function Normalize-PhraseBoundarySpacing([string]$before, [string]$phrase, [string]$after) {
+    if ($null -eq $before) { $before = "" }
+    if ($null -eq $phrase) { $phrase = "" }
+    if ($null -eq $after)  { $after  = "" }
+
+    if ($before.Length -gt 0 -and $phrase.Length -gt 0) {
+        $left = $before[$before.Length - 1]
+        $p0   = $phrase[0]
+        if ((Is-JoinWordChar $left) -and (Is-JoinWordChar $p0)) {
+            $before = $before + " "
+        }
+    }
+
+    if ($phrase.Length -gt 0 -and $after.Length -gt 0) {
+        $pr = $phrase[$phrase.Length - 1]
+        $a0 = $after[0]
+        if ((-not [char]::IsWhiteSpace($pr)) -and (Is-JoinWordChar $a0)) {
+            $after = " " + $after
+        }
+    }
+
+    [PSCustomObject]@{
+        Before = $before
+        Phrase = $phrase
+        After  = $after
+    }
+}
+
 if (-not (Test-Path $csvPath)) {
     Write-Error "Cannot find $csvPath — run from the repo root."
     exit 1
@@ -338,6 +370,11 @@ $entries = foreach ($line in $csvLines) {
     $actualPhrase = $full.Substring($m.Index, $m.Length)  # original casing
     $after        = $full.Substring($m.Index + $m.Length)
 
+    $joined = Normalize-PhraseBoundarySpacing $before $actualPhrase $after
+    $before = $joined.Before
+    $actualPhrase = $joined.Phrase
+    $after = $joined.After
+
     $trunc = Truncate-AroundPhrase $before $actualPhrase $after $maxQuoteLen
     if ($trunc.Truncated) { $truncatedLongCount++ }
     $before = $trunc.Before
@@ -346,6 +383,11 @@ $entries = foreach ($line in $csvLines) {
     $beforeTrimmed = Trim-BeforeForPhraseVisibility $before $actualPhrase $maxBodyChars
     if ($beforeTrimmed -ne $before) { $trimmedBeforeCount++ }
     $before = $beforeTrimmed
+
+    $joined = Normalize-PhraseBoundarySpacing $before $actualPhrase $after
+    $before = $joined.Before
+    $actualPhrase = $joined.Phrase
+    $after = $joined.After
 
     $tightBudget = [Math]::Max(80, [int][Math]::Floor($maxQuoteLen * 0.75))
     $compactBudget = [Math]::Max(64, [int][Math]::Floor($maxQuoteLen * 0.55))
@@ -357,10 +399,18 @@ $entries = foreach ($line in $csvLines) {
     $tightAfter = $tight.After
     if ($tight.Truncated) { $tightVariantCount++ }
 
+    $joined = Normalize-PhraseBoundarySpacing $tightBefore $actualPhrase $tightAfter
+    $tightBefore = $joined.Before
+    $tightAfter = $joined.After
+
     $compactBodyBudget = [Math]::Max(48, [int][Math]::Floor($maxBodyChars * 0.75))
     $compactBefore = Trim-BeforeForPhraseVisibility $compact.Before $actualPhrase $compactBodyBudget
     $compactAfter = $compact.After
     if ($compact.Truncated) { $compactVariantCount++ }
+
+    $joined = Normalize-PhraseBoundarySpacing $compactBefore $actualPhrase $compactAfter
+    $compactBefore = $joined.Before
+    $compactAfter = $joined.After
 
     $attr         = "$title, $author"
 
