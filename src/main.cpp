@@ -77,6 +77,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <esp_attr.h>
 #include <GxEPD2_3C.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <RV-3028-C7.h>
@@ -134,11 +135,24 @@ U8G2_FOR_ADAFRUIT_GFX u8g2f;
 RV3028 rtc;
 
 // ── State ─────────────────────────────────────────────────────────────────────
-static int16_t g_lastMinute           = -1; ///< −1 = not yet rendered
-static int8_t  g_lastMaintenanceMonth = -1; ///< 1–12, or -1 if never run
-static bool    g_quoteLookupReady     = false;
 static uint16_t g_rtcUpdateFailStreak = 0;
-static uint16_t g_quoteByMinute[1440];
+
+static const uint32_t RETAINED_STATE_MAGIC = 0x4C434C4Bu; // 'LCLK'
+RTC_DATA_ATTR static uint32_t g_retainedStateMagic = 0;
+RTC_DATA_ATTR static int16_t  g_lastMinute         = -1;  ///< −1 = not yet rendered
+RTC_DATA_ATTR static int8_t   g_lastMaintenanceMonth = -1; ///< 1–12, or -1 if never run
+RTC_DATA_ATTR static bool     g_quoteLookupReadyRetained = false;
+RTC_DATA_ATTR static uint16_t g_quoteByMinuteRetained[1440];
+
+static const ClockService::DisplaySleepPins DISPLAY_SLEEP_PINS = {
+  /*csPin=*/2,
+  /*dcPin=*/3,
+  /*rstPin=*/4,
+  /*busyPin=*/5,
+  /*sckPin=*/8,
+  /*mosiPin=*/10,
+  /*enableRtcHold=*/true
+};
 
 // ── Layout constants (landscape: 212 wide × 104 tall) ───────────────────────
 static const int16_t MARGIN = 3;
@@ -180,6 +194,16 @@ static void     showFatalErrorAndHalt(const char* code, const char* detail);
 // ═════════════════════════════════════════════════════════════════════════════
 void setup()
 {
+  ClockService::releaseDisplayPinsAfterWake(DISPLAY_SLEEP_PINS);
+
+  if (g_retainedStateMagic != RETAINED_STATE_MAGIC) {
+    g_retainedStateMagic = RETAINED_STATE_MAGIC;
+    g_lastMinute = -1;
+    g_lastMaintenanceMonth = -1;
+    g_quoteLookupReadyRetained = false;
+    for (uint16_t i = 0; i < 1440u; i++) g_quoteByMinuteRetained[i] = 0u;
+  }
+
   pinMode(EPD_BUSY_PIN, INPUT);
   Serial.begin(115200);
   delay(200);
@@ -239,27 +263,33 @@ void loop()
        minute, (int)g_lastMinute);
 
   if (g_lastMinute != (int16_t)minute) {
-    const uint16_t idx = g_quoteLookupReady
-      ? g_quoteByMinute[minute]
+    const uint16_t idx = g_quoteLookupReadyRetained
+      ? g_quoteByMinuteRetained[minute]
       : QuoteLookup::findQuote(minute, QUOTES, NUM_QUOTES);
     if (!QuoteLookup::hasRenderablePhrase(QUOTES, NUM_QUOTES, idx)) {
       TLOG("Skipped quote %u for min %u: missing/blank phrase", idx, minute);
       g_lastMinute = (int16_t)minute;
-      delay(1000);
-      return;
+    } else {
+      TLOG("Rendering quote %u for min %u", idx, minute);
+      const uint32_t t0 = millis();
+      renderQuote(idx);
+      TLOG("Render done in %u ms. BUSY=%s", (unsigned)(millis() - t0), BUSY_STATE());
+      g_lastMinute = (int16_t)minute;
+      display.hibernate();
+      TLOG("hibernate() done. BUSY=%s", BUSY_STATE());
     }
-    TLOG("Rendering quote %u for min %u", idx, minute);
-    const uint32_t t0 = millis();
-    renderQuote(idx);
-    TLOG("Render done in %u ms. BUSY=%s", (unsigned)(millis() - t0), BUSY_STATE());
-    g_lastMinute = (int16_t)minute;
-    display.hibernate();
-    TLOG("hibernate() done. BUSY=%s", BUSY_STATE());
-  } else {
-    const uint32_t pollMs = (secs >= POLL_FAST_START_SEC) ? POLL_FAST_MS : POLL_NORMAL_MS;
-    TLOG("Same minute — waiting %u ms", (unsigned)pollMs);
-    delay(pollMs);
   }
+
+  if (!rtc.updateTime()) {
+    TLOG("WARN: rtc.updateTime() failed before sleep scheduling; using 60s fallback");
+  }
+  const uint64_t sleepSecs = ClockService::secondsUntilNextMinute(rtc);
+  const uint64_t sleepUs   = sleepSecs * 1000000ULL;
+
+  TLOG("Entering deep sleep for %llu s", (unsigned long long)sleepSecs);
+  ClockService::disableRadios();
+  ClockService::prepareDisplayPinsForDeepSleep(DISPLAY_SLEEP_PINS);
+  ClockService::enterDeepSleepTimerUs(sleepUs);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,8 +297,13 @@ void loop()
 /// This removes binary-search and phrase-validation overhead from loop().
 static bool initQuoteLookup()
 {
-  const uint16_t renderableCount = QuoteLookup::initLookupTable(g_quoteByMinute, QUOTES, NUM_QUOTES);
-  g_quoteLookupReady = true;
+  if (g_quoteLookupReadyRetained) {
+    TLOG("Quote lookup restored from retained memory");
+    return true;
+  }
+
+  const uint16_t renderableCount = QuoteLookup::initLookupTable(g_quoteByMinuteRetained, QUOTES, NUM_QUOTES);
+  g_quoteLookupReadyRetained = (renderableCount > 0);
   TLOG("Quote lookup initialized (1440 minutes), renderable=%u", (unsigned)renderableCount);
   return renderableCount > 0;
 }

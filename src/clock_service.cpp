@@ -2,11 +2,39 @@
 
 #include <WiFi.h>
 #include <esp_bt.h>
+#include <esp_sleep.h>
 #include <time.h>
+#include <driver/gpio.h>
+#include <driver/rtc_io.h>
 
 namespace ClockService {
 
 namespace {
+
+static void setOutputLevel(int8_t pin, uint8_t level)
+{
+  if (pin < 0) return;
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, level);
+}
+
+static void holdRtcPinIfValid(int8_t pin)
+{
+  if (pin < 0) return;
+  const gpio_num_t gpio = (gpio_num_t)pin;
+  if (rtc_gpio_is_valid_gpio(gpio)) {
+    gpio_hold_en(gpio);
+  }
+}
+
+static void releaseRtcPinHoldIfValid(int8_t pin)
+{
+  if (pin < 0) return;
+  const gpio_num_t gpio = (gpio_num_t)pin;
+  if (rtc_gpio_is_valid_gpio(gpio)) {
+    gpio_hold_dis(gpio);
+  }
+}
 
 // Convert UTC date/time to Unix epoch without mktime() local-time side effects.
 static time_t utcToEpoch(uint16_t year,
@@ -164,6 +192,61 @@ bool maybeRunMonthlyMaintenance(RV3028& rtc,
   syncRtcFromNtp(rtc, cfg);
   lastMaintenanceMonth = (int8_t)month;
   return true;
+}
+
+uint64_t secondsUntilNextMinute(RV3028& rtc)
+{
+  const uint8_t sec = rtc.getSeconds();
+  if (sec >= 59u) return 1u;
+  const uint64_t remain = (uint64_t)(60u - sec);
+  return (remain == 0u) ? 1u : remain;
+}
+
+void prepareDisplayPinsForDeepSleep(const DisplaySleepPins& pins)
+{
+  // Keep panel SPI/control lines deterministic before the SoC enters deep sleep.
+  setOutputLevel(pins.csPin, HIGH);   // deselect panel
+  setOutputLevel(pins.dcPin, LOW);
+  setOutputLevel(pins.rstPin, HIGH);
+  setOutputLevel(pins.sckPin, LOW);
+  setOutputLevel(pins.mosiPin, LOW);
+
+  if (pins.busyPin >= 0) {
+    pinMode(pins.busyPin, INPUT_PULLUP);
+  }
+
+  if (pins.enableRtcHold) {
+    holdRtcPinIfValid(pins.csPin);
+    holdRtcPinIfValid(pins.dcPin);
+    holdRtcPinIfValid(pins.rstPin);
+    holdRtcPinIfValid(pins.busyPin);
+    gpio_deep_sleep_hold_en();
+  }
+}
+
+void releaseDisplayPinsAfterWake(const DisplaySleepPins& pins)
+{
+  if (pins.enableRtcHold) {
+    releaseRtcPinHoldIfValid(pins.csPin);
+    releaseRtcPinHoldIfValid(pins.dcPin);
+    releaseRtcPinHoldIfValid(pins.rstPin);
+    releaseRtcPinHoldIfValid(pins.busyPin);
+    gpio_deep_sleep_hold_dis();
+  }
+}
+
+[[noreturn]] void enterDeepSleepTimerUs(uint64_t wakeUs)
+{
+  const uint64_t MIN_WAKE_US = 200000ULL;
+  if (wakeUs < MIN_WAKE_US) wakeUs = MIN_WAKE_US;
+
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_timer_wakeup(wakeUs);
+  esp_deep_sleep_start();
+
+  while (true) {
+    delay(1000);
+  }
 }
 
 } // namespace ClockService
