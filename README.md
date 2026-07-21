@@ -50,6 +50,8 @@ Notes:
 - Characters outside U+00FF are compatibility-folded for display-font safety.
 - Overlength rows are retained by generator-side truncation around the time phrase.
 - Truncation is whole-word only and keeps contiguous source text.
+- The firmware does a final display-aware fit at render time: it trims the quote end first, then trims the start if needed to keep the time visible, and falls back to balancing around the time phrase for very large quotes.
+- Attribution is rendered on one or two lines depending on how much vertical space the quote leaves on the display.
 
 ## Wi-Fi Credentials (Optional for NTP)
 
