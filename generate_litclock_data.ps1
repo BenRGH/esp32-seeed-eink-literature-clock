@@ -291,6 +291,8 @@ $csvLines = Get-Content $csvPath -Encoding UTF8
 Write-Host "$($csvLines.Count) source rows."
 $trimmedBeforeCount = 0
 $truncatedLongCount = 0
+$tightVariantCount = 0
+$compactVariantCount = 0
 
 $entries = foreach ($line in $csvLines) {
     $parts = $line.Split('|')
@@ -345,6 +347,21 @@ $entries = foreach ($line in $csvLines) {
     if ($beforeTrimmed -ne $before) { $trimmedBeforeCount++ }
     $before = $beforeTrimmed
 
+    $tightBudget = [Math]::Max(80, [int][Math]::Floor($maxQuoteLen * 0.75))
+    $compactBudget = [Math]::Max(64, [int][Math]::Floor($maxQuoteLen * 0.55))
+
+    $tight = Truncate-AroundPhrase $before $actualPhrase $after $tightBudget
+    $compact = Truncate-AroundPhrase $before $actualPhrase $after $compactBudget
+
+    $tightBefore = Trim-BeforeForPhraseVisibility $tight.Before $actualPhrase $maxBodyChars
+    $tightAfter = $tight.After
+    if ($tight.Truncated) { $tightVariantCount++ }
+
+    $compactBodyBudget = [Math]::Max(48, [int][Math]::Floor($maxBodyChars * 0.75))
+    $compactBefore = Trim-BeforeForPhraseVisibility $compact.Before $actualPhrase $compactBodyBudget
+    $compactAfter = $compact.After
+    if ($compact.Truncated) { $compactVariantCount++ }
+
     $attr         = "$title, $author"
 
     # Escape for C string literals (backslash first, then double-quote)
@@ -360,6 +377,10 @@ $entries = foreach ($line in $csvLines) {
         Phrase = (& $esc $actualPhrase)
         After  = (& $esc $after)
         Attr   = (& $esc $attr)
+        BeforeTight = (& $esc $tightBefore)
+        AfterTight  = (& $esc $tightAfter)
+        BeforeCompact = (& $esc $compactBefore)
+        AfterCompact  = (& $esc $compactAfter)
     }
 }
 
@@ -368,6 +389,8 @@ $sorted = @($entries | Sort-Object Minute)
 Write-Host "$($sorted.Count) entries retained after filtering."
 Write-Host "$truncatedLongCount overlength entries were retained via truncation."
 Write-Host "$trimmedBeforeCount entries had leading text pre-trimmed for phrase visibility."
+Write-Host "$tightVariantCount entries generated a tighter fallback variant."
+Write-Host "$compactVariantCount entries generated a compact fallback variant."
 
 # ── Build header ──────────────────────────────────────────────────────────────
 $sfwLabel = if ($sfwOnly) { 'SFW only' } else { 'SFW + NSFW' }
@@ -386,11 +409,15 @@ $h.Add("  const char* before;   ///< text before the time phrase")
 $h.Add("  const char* phrase;   ///< time phrase (rendered in red)")
 $h.Add("  const char* after;    ///< text after the time phrase")
 $h.Add("  const char* attr;     ///< attribution: Title, Author")
+$h.Add("  const char* beforeTight;   ///< precomputed tighter before-text fallback")
+$h.Add("  const char* afterTight;    ///< precomputed tighter after-text fallback")
+$h.Add("  const char* beforeCompact; ///< precomputed compact before-text fallback")
+$h.Add("  const char* afterCompact;  ///< precomputed compact after-text fallback")
 $h.Add("};")
 $h.Add("")
 $h.Add("const LitQuote QUOTES[] = {")
 foreach ($q in $sorted) {
-    $h.Add("  { $($q.Minute), `"$($q.Before)`", `"$($q.Phrase)`", `"$($q.After)`", `"$($q.Attr)`" },")
+    $h.Add("  { $($q.Minute), `"$($q.Before)`", `"$($q.Phrase)`", `"$($q.After)`", `"$($q.Attr)`", `"$($q.BeforeTight)`", `"$($q.AfterTight)`", `"$($q.BeforeCompact)`", `"$($q.AfterCompact)`" },")
 }
 $h.Add("};")
 $h.Add("")

@@ -4,6 +4,9 @@
 
 namespace {
 
+constexpr const uint8_t* kQuoteFontRegular = u8g2_font_helvR10_tf;
+constexpr const uint8_t* kQuoteFontPhrase  = u8g2_font_helvB10_tf;
+
 struct QuoteLayoutMetrics {
   int16_t bottomY;
   bool    quoteFits;
@@ -95,6 +98,7 @@ static String trimBeforeOneWord(const String& before, const char* truncMarker)
 static void walkWrappedSegment(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
                                const char* text,
                                bool isPhrase,
+                               const uint8_t* font,
                                uint16_t colour,
                                bool draw,
                                int16_t margin,
@@ -109,6 +113,7 @@ static void walkWrappedSegment(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
                                bool& phraseFits)
 {
   if (!text || !*text) return;
+  u8g2f.setFont(font ? font : kQuoteFontRegular);
   if (draw) u8g2f.setForegroundColor(colour);
 
   char           wordBuf[256];
@@ -187,13 +192,13 @@ static QuoteLayoutMetrics measureQuoteLayout(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
   bool phraseSeen = false;
   bool phraseFits = true;
 
-  walkWrappedSegment(u8g2f, before.c_str(), false, GxEPD_BLACK, false,
+  walkWrappedSegment(u8g2f, before.c_str(), false, kQuoteFontRegular, GxEPD_BLACK, false,
                      margin, maxX, x, y, lineH, maxY,
                      bottomY, overflow, phraseSeen, phraseFits);
-  walkWrappedSegment(u8g2f, phrase.c_str(), true, GxEPD_RED, false,
+  walkWrappedSegment(u8g2f, phrase.c_str(), true, kQuoteFontPhrase, GxEPD_RED, false,
                      margin, maxX, x, y, lineH, maxY,
                      bottomY, overflow, phraseSeen, phraseFits);
-  walkWrappedSegment(u8g2f, after.c_str(), false, GxEPD_BLACK, false,
+  walkWrappedSegment(u8g2f, after.c_str(), false, kQuoteFontRegular, GxEPD_BLACK, false,
                      margin, maxX, x, y, lineH, maxY,
                      bottomY, overflow, phraseSeen, phraseFits);
 
@@ -331,6 +336,7 @@ static AttrLayout layoutAttribution(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
 
 static void renderSegment(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
                           const char* text,
+                          const uint8_t* font,
                           uint16_t colour,
                           int16_t margin,
                           int16_t maxX,
@@ -343,7 +349,7 @@ static void renderSegment(U8G2_FOR_ADAFRUIT_GFX& u8g2f,
   bool overflow = false;
   bool phraseSeen = false;
   bool phraseFits = true;
-  walkWrappedSegment(u8g2f, text, false, colour, true,
+  walkWrappedSegment(u8g2f, text, false, font, colour, true,
                      margin, maxX, x, y, lineH, maxY,
                      bottomY, overflow, phraseSeen, phraseFits);
 }
@@ -356,6 +362,10 @@ void renderQuoteToDisplay(ClockDisplay& display,
                           const char* phrase,
                           const char* after,
                           const char* attr,
+                          const char* beforeTight,
+                          const char* afterTight,
+                          const char* beforeCompact,
+                          const char* afterCompact,
                           int16_t margin,
                           int16_t maxX,
                           int16_t attrY,
@@ -369,7 +379,7 @@ void renderQuoteToDisplay(ClockDisplay& display,
   display.init(115200, false, 20, false);
   display.setRotation(1);
   u8g2f.begin(display);
-  u8g2f.setFont(u8g2_font_helvR10_tf);
+  u8g2f.setFont(kQuoteFontRegular);
   u8g2f.setBackgroundColor(GxEPD_WHITE);
 
   const int16_t ascent  = (int16_t)u8g2f.getFontAscent();
@@ -381,18 +391,45 @@ void renderQuoteToDisplay(ClockDisplay& display,
   String beforeText = before ? String(before) : String("");
   const String phraseText = phrase ? String(phrase) : String("");
   String afterText  = after  ? String(after)  : String("");
-  QuoteLayoutMetrics quoteMetrics;
-  fitQuoteToDisplay(u8g2f,
-                    beforeText,
-                    phraseText,
-                    afterText,
-                    margin,
-                    maxX,
-                    startY,
-                    lineH,
-                    maxY,
-                    truncMarker,
-                    quoteMetrics);
+  QuoteLayoutMetrics quoteMetrics = measureQuoteLayout(
+    u8g2f, beforeText, phraseText, afterText, margin, maxX, startY, lineH, maxY
+  );
+
+  struct VariantPair { const char* b; const char* a; };
+  const VariantPair variants[2] = {
+    { beforeTight, afterTight },
+    { beforeCompact, afterCompact }
+  };
+  for (const VariantPair& v : variants) {
+    if (quoteMetrics.quoteFits && quoteMetrics.phraseFits) break;
+    if (!v.b && !v.a) continue;
+
+    const String vb = v.b ? String(v.b) : String("");
+    const String va = v.a ? String(v.a) : String("");
+    QuoteLayoutMetrics vm = measureQuoteLayout(
+      u8g2f, vb, phraseText, va, margin, maxX, startY, lineH, maxY
+    );
+    if (vm.quoteFits && vm.phraseFits) {
+      beforeText = vb;
+      afterText = va;
+      quoteMetrics = vm;
+      break;
+    }
+  }
+
+  if (!quoteMetrics.quoteFits || !quoteMetrics.phraseFits) {
+    fitQuoteToDisplay(u8g2f,
+                      beforeText,
+                      phraseText,
+                      afterText,
+                      margin,
+                      maxX,
+                      startY,
+                      lineH,
+                      maxY,
+                      truncMarker,
+                      quoteMetrics);
+  }
 
   String attrText = String("-- ") + (attr ? attr : "");
   const bool attrFitsOneLine = (int16_t)u8g2f.getUTF8Width(attrText.c_str()) <= (maxX - margin);
@@ -414,9 +451,9 @@ void renderQuoteToDisplay(ClockDisplay& display,
 
     int16_t x = margin;
     int16_t y = startY;
-    renderSegment(u8g2f, beforeText.c_str(), GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
-    renderSegment(u8g2f, phraseText.c_str(), GxEPD_RED, margin, maxX, x, y, lineH, maxY);
-    renderSegment(u8g2f, afterText.c_str(), GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, beforeText.c_str(), kQuoteFontRegular, GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, phraseText.c_str(), kQuoteFontPhrase, GxEPD_RED, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, afterText.c_str(), kQuoteFontRegular, GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
 
     u8g2f.setForegroundColor(GxEPD_BLACK);
     for (uint8_t i = 0; i < attrLayout.lineCount; i++) {
@@ -436,7 +473,7 @@ void renderQuoteToDisplay(ClockDisplay& display,
   display.init(115200, false, 20, false);
   display.setRotation(1);
   u8g2f.begin(display);
-  u8g2f.setFont(u8g2_font_helvR10_tf);
+  u8g2f.setFont(kQuoteFontRegular);
   u8g2f.setBackgroundColor(GxEPD_WHITE);
 
   const int16_t ascent = (int16_t)u8g2f.getFontAscent();
@@ -455,16 +492,16 @@ void renderQuoteToDisplay(ClockDisplay& display,
     display.fillScreen(GxEPD_WHITE);
     int16_t x = margin;
     int16_t y = startY;
-    renderSegment(u8g2f, hdr.c_str(), GxEPD_RED, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, hdr.c_str(), kQuoteFontRegular, GxEPD_RED, margin, maxX, x, y, lineH, maxY);
     x = margin;
     y += lineH;
-    renderSegment(u8g2f, c.c_str(), GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, c.c_str(), kQuoteFontRegular, GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
     x = margin;
     y += lineH;
-    renderSegment(u8g2f, d.c_str(), GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, d.c_str(), kQuoteFontRegular, GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
     x = margin;
     y += lineH;
-    renderSegment(u8g2f, "Reboot required", GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
+    renderSegment(u8g2f, "Reboot required", kQuoteFontRegular, GxEPD_BLACK, margin, maxX, x, y, lineH, maxY);
   } while (display.nextPage());
 
   display.hibernate();

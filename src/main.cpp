@@ -120,7 +120,7 @@
 #define POLL_FAST_START_SEC    57      ///< Use fast polling at second >= this value
 #define RTC_INIT_FATAL_ATTEMPTS 30     ///< Escalate if RTC init fails continuously at boot
 #define RTC_UPDATE_FATAL_STREAK 120    ///< Escalate if RTC updates fail continuously in loop
-#define DEBUG_LOG              1       ///< 1 = info logs enabled, 0 = silent
+#define DEBUG_LOG              0       ///< 1 = info logs enabled, 0 = silent
 
 // ── Display ─────────────────────────────────────────────────────────────────
 // MH-ET LIVE 2.13" 3-colour, GDEW0213Z16, 104×212 px, UC8151 driver.
@@ -327,6 +327,10 @@ static void renderQuote(uint16_t idx)
     QUOTES[idx].phrase,
     QUOTES[idx].after,
     QUOTES[idx].attr,
+    QUOTES[idx].beforeTight,
+    QUOTES[idx].afterTight,
+    QUOTES[idx].beforeCompact,
+    QUOTES[idx].afterCompact,
     MARGIN,
     MAX_X,
     ATTR_Y,
